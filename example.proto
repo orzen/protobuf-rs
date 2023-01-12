@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+import "types.proto";
+
+package a.b.c;
+
+option global_opt = "value";
+
+service Svc {
+    rpc Add(Foo) returns (Bar) {rcpOpt = "foo"};
+    rpc Remove(Foo) returns (Bar);
+    rpc Stream(stream Foo) returns (stream Bar);
+}
+
+message Foo {
+	option operation = "set,get,list,delete";
+	message Meta {
+		int32 id = 1;
+	}
+	Meta meta = 1;
+	string bar = 2;
+	repeated int32 baz = 3;
+}
+
+message Bar {
+	option operation = "set,delete";
+	enum BarStatus {
+		option enumOpt = true;
+		NOT_OK = 0 [fo1=true,fo2="ok"];
+		OK = 1;
+	}
+	message Meta {
+		int32 id = 1;
+		BarStatus status = 2;
+	}
+	Meta meta = 1;
+	string bar = 2;
+	repeated int32 baz = 3 [packed=true];
+	map<int32, string> my_map = 4;
+	oneof either {
+		option oneofOpt = true;
+		string oneOr = 5;
+		int32 theOther = 6;
+	}
+}
