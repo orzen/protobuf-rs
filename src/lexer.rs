@@ -1,13 +1,12 @@
-use log::warn;
+use log::{debug, warn};
 use regex::Regex;
 use std::io::Read;
 
 use crate::buffer::Buffer;
+use crate::error::LexerError;
 use crate::position::Position;
-use crate::token::{
-    Sym,
-    Token,
-};
+use crate::token::Token;
+use crate::token_stream::TokenStream;
 
 // Boolean
 const BOOL_LIT: &str = r"(true | false)";
@@ -36,241 +35,199 @@ const OCT_ESCAPE: &str = "(\\[0-7]{3})";
 // Char escape values
 const CHAR_ESCAPE: &str = "\\[abfnrtv]{1}";
 
-pub struct Lexer<T> {
-    inner: Buffer<T>,
-    line_buf: String,
-    stash: String,
-    in_strlit: bool,
-    strlit_quote: Sym,
-    // Position
-    column: i32,
-    line: i32,
-    ptn_boollit: Regex,
+enum State<'s> {
+    Default,
+    Comment,
+    BlockComment,
+    Constant(&'s char),
+}
+
+impl<'s> Default for State<'s> {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+pub struct Lexer<'l> {
+    pos: Position,
+    state: State<'l>,
+
     ptn_intlit: Regex,
-    ptn_floatlit: Regex,
     ptn_ident: Regex,
     ptn_full_ident: Regex,
     ptn_const: Regex,
 }
 
-impl<T: Read> Lexer<T> {
-    pub fn new(inner: Buffer<T>) -> Self {
+impl<'l> Lexer<'l> {
+    pub fn new() -> Lexer<'l> {
         let int_lit = format!("({}) | ({}) | ({})", DEC_LIT, OCT_LIT, HEX_LIT);
-        let str_lit_base = format!(
-            "({} | {} | {} )",
-            HEX_ESCAPE, OCT_ESCAPE, CHAR_ESCAPE
-        );
+        let str_lit_base = format!("({} | {} | {} )", HEX_ESCAPE, OCT_ESCAPE, CHAR_ESCAPE);
         let str_lit = format!("( \"{}\" | \'{}\' )", str_lit_base, str_lit_base);
         let float_lit = format!(
-            "( {} | {} | {} | {})",
+            "( {} | {} | {} | {} )",
             FLOAT_LIT1, FLOAT_LIT2, FLOAT_LIT3, FLOAT_LIT4
         );
+        // TODO fix constant
+        // - Add quote to contant
+        // - Add second constant pattern with single quote
         let constant = format!(
             "{} | [+-]?{} | [+-]?{} | {} | {}",
             FULL_IDENT, int_lit, float_lit, str_lit, BOOL_LIT
         );
 
         // Patterns
-        let ptn_boollit = Regex::new(BOOL_LIT).expect("compile bool pattern");
-        let ptn_const =
-            Regex::new(constant.as_str()).expect("compile const1 pattern");
-        let ptn_floatlit = Regex::new(float_lit.as_str()).expect("compiler float pattern");
+        let ptn_const = Regex::new(&constant).expect("compile const1 pattern");
         let ptn_full_ident = Regex::new(FULL_IDENT).expect("compile full ident pattern");
         let ptn_ident = Regex::new(IDENT).expect("compile ident pattern");
-        let ptn_intlit = Regex::new(int_lit.as_str()).expect("compile ident pattern");
+        let ptn_intlit = Regex::new(&int_lit).expect("compile ident pattern");
 
-        Self {
-            inner,
-            line_buf: String::new(),
-            stash: String::new(),
-            in_strlit: false,
-            strlit_quote: Sym::Quote1,
-            // Position
-            column: 0,
-            line: 0,
-            ptn_boollit,
+        Lexer {
+            pos: Position::new(0, 0),
+            state: State::default(),
+
+            // Patterns
             ptn_intlit,
-            ptn_floatlit,
             ptn_ident,
             ptn_full_ident,
             ptn_const,
         }
     }
 
-    // Order for the following functions are based on their priority in patterns.
-    fn as_bool(s: &str) -> Token {
-        if s == "true" {
-            return Token::Bool(true)
+    fn end_state(&self, ch: &char) -> bool {
+        match self.state {
+            State::Default => false,
+            State::Comment => matches!(ch, '\n' | '\r' | '\t' | ' '),
+            State::BlockComment => true,
+            State::Constant(delimiter) => ch == delimiter,
         }
-        Token::Bool(false)
     }
 
-    fn as_const(s: &str) -> Token {
-        Token::Constant(s.to_string())
+    fn is_discardable(&self, ch: &char) -> bool {
+        match self.state {
+            State::Default => matches!(ch, '\n' | '\r' | '\t' | ' '),
+            State::Comment => matches!(ch, '\n' | '\r' | '\t' | ' '),
+            State::BlockComment => true,
+            State::Constant(delimiter) => true,
+        }
     }
 
-    fn as_int(s: &str) -> Token {
-        let int = s.parse::<i64>().unwrap_or_else(|e| {
-            warn!("decode int from '{}': {}", s, e);
-            0
-        });
-        Token::Int(int)
-    }
-
-    fn as_float(s: &str) -> Token {
-        let float = s.parse::<f64>().unwrap_or_else(|e| {
-            warn!("decode float from '{}': {}", s, e);
-            0.0
-        });
-        Token::Float(float)
-    }
-
-    fn as_ident(s: &str) -> Token { Token::Ident(s.to_string()) }
-
-    fn as_full_ident(s: &str) -> Token { Token::FullIdent(s.to_string()) }
-
-    fn is_discard(ch: &char) -> bool {
-        matches!(ch, '\r' | '\n')
-    }
-
-    fn is_separator(ch: &char) -> bool {
-        matches!(ch, ' ' | '\t')
-    }
-
-    fn is_quote(ch: &char) -> Option<Sym> {
-        let sym = match Sym::from_char(ch) {
-                Some(Sym::Quote1) => Sym::Quote1,
-                Some(Sym::Quote2) => Sym::Quote2,
-                _ => return None,
-        };
-
-        Some(sym)
-    }
-
-    pub fn pos(&self) -> Position {
-        Position::new(self.column, self.line)
-    }
-
-    // Toggles strlit accumulation state. Returns true if the state change.
-    fn toggle_strlit(&mut self, sym: Sym) {
-        self.strlit_quote = sym;
-        self.in_strlit = !self.in_strlit;
-    }
-
-    fn match_token(&self) -> Option<Token> {
+    fn match_literals(&self, stash: &'l str) -> Token {
         // NOTE: The order in this list will dictate the token priority. Changing the order can
         // cause some tokens to become unreachable.
-        let ptns = vec![
-            (&self.ptn_boollit, Self::as_bool as fn(&str) -> Token),
-            (&self.ptn_intlit, Self::as_int as fn(&str) -> Token),
-            (&self.ptn_floatlit, Self::as_float as fn(&str) -> Token),
-            (&self.ptn_ident, Self::as_ident as fn(&str) -> Token),
-            (&self.ptn_full_ident, Self::as_full_ident as fn(&str) -> Token),
-            (&self.ptn_const, Self::as_const as fn(&str) -> Token),
-        ];
 
-        for (ptn, f) in ptns {
-            if ptn.is_match(self.stash.as_str()) {
-                return Some(f(self.stash.as_str()))
+        match stash {
+            "true" => return Token::BoolLit(true),
+            "false" => return Token::BoolLit(false),
+            _ => (),
+        }
+
+        if self.ptn_intlit.is_match(stash) {
+            match stash.parse::<i32>() {
+                Ok(v) => {
+                    return Token::IntLit(v);
+                }
+                Err(e) => {
+                    warn!("failed to convert string to int literal {e}");
+                    return Token::Illegal;
+                }
             }
         }
 
-        None
+        if self.ptn_ident.is_match(stash) {
+            return Token::Ident(stash.to_string());
+        }
+
+        if self.ptn_full_ident.is_match(stash) {
+            return Token::FullIdent(stash.to_string());
+        }
+
+        if self.ptn_const.is_match(stash) {
+            return Token::Constant(stash.to_string());
+        }
+
+        return Token::Illegal;
     }
 
-    pub fn next(&mut self) -> Option<Token> {
-        let mut counter = 0;
-        let mut is_strlit: Option<Sym> = None;
+    pub fn tokenize(&self, ch: char, stash: &mut String) -> Option<Token> {
+        // Ignored characters
+        if self.is_discardable(&ch) {
+            return None;
+        }
 
-        // Feed a line into the line buffer if it's empty
-        if self.line_buf.is_empty() {
-            self.line_buf = match self.inner.next() {
-                Some(line) => line,
-                // TODO add additional error handling to handle EOF gracefully
-                None => {
-                    return None
+        // Match single character tokens
+        if stash.is_empty() {
+            match Token::from(&ch) {
+                Token::Illegal => (),
+                token => return Some(token),
+            }
+        }
+
+        // Stash character to build multi-character tokens
+        stash.push(ch);
+
+        // Match keywords against stash
+        match Token::from(stash.as_str()) {
+            Token::Illegal => (),
+            token => return Some(token),
+        }
+
+        match self.match_literals(stash) {
+            Token::Illegal => (),
+            token => return Some(token),
+        }
+
+        return None;
+    }
+
+    pub fn next_token<T>(&mut self, buf: &mut Buffer<T>) -> Result<Token, LexerError>
+    where
+        T: Read,
+    {
+        let mut stash = String::new();
+        while let Some(chars) = buf.next() {
+            for ch in chars {
+                if ch.eq(&'\n') {
+                    self.pos *= 1;
+                } else {
+                    self.pos += 1;
+                }
+
+                let token = self.tokenize(ch, &mut stash);
+
+                match token {
+                    Some(Token::Illegal) => {
+                        debug!("invalid token '{stash}'");
+                        return Err(LexerError::Invalid(stash.clone()));
+                    }
+                    Some(token) => {
+                        debug!("identified token: {:?}", token);
+                        return Ok(token);
+                    }
+                    None => {
+                        debug!("stashing: {ch}, stash: {stash}");
+                        continue;
+                    }
                 }
             }
         }
 
-        // Consume from the line buffer
-        for (i, ch) in self.line_buf.chars().enumerate() {
-            // Update counter that's tracking how much of the line buffer that's been consumed.
-            counter = i;
+        Ok(Token::Illegal)
+    }
 
-            // Update position
-            self.column += 1;
-            if ch == '\n' {
-                self.line += 1;
-                self.column = 0;
-            }
+    pub fn token_stream<T>(&mut self, mut buf: Buffer<T>) -> Result<TokenStream, LexerError>
+    where
+        T: Read,
+    {
+        let mut tokens = TokenStream::new();
+        while let Ok(token) = self.next_token(&mut buf) {
+            tokens.push(token.clone());
 
-            // Move on to the next character if ch is a character that should not end up in the
-            // stash. This rule is ignored if the lexer is handling a string literal since the
-            // literal can contain otherwise unwanted characters.
-            if Self::is_discard(&ch) && !self.in_strlit {
-                continue;
-            }
-
-            // Check if the lexer is in the strlit state
-            if let Some(sym) = Self::is_quote(&ch) {
-                // Return if we got a symbol mismatch and already inside a strlit. E.g. single quote in a
-                // double quote string.
-                if self.in_strlit && self.strlit_quote != sym {
-                    return None;
-                }
-
-                is_strlit = Some(sym);
-
+            if token == Token::EOF {
                 break;
             }
-
-            // String literals can contain other symbols that might otherwise be part of tokens.
-            // This section handles when the lexer swallows almost every thing as part of the
-            // string literal.
-            if !self.in_strlit {
-                if let Some(sym) = Sym::from_char(&ch) {
-                    return Some(Token::Symbol(sym))
-                }
-
-                // Break if we found the separator character
-                if Self::is_separator(&ch) {
-                    break;
-                }
-            }
-
-            self.stash.push(ch);
         }
 
-        // Remove characters consumed characters from the line buffer
-        if counter != 0 {
-            self.line_buf.drain(..counter);
-        }
-
-        // Return string literal as constant if the lexer detected end of string literal.
-        // toggle_strlit return a bool that represent if it changed strlit state. If it change
-        // the state and in_strlit is false, this means that the lexer where parsing a string
-        // literal but has now stopped. In other words, the string literal is complete.
-        if let Some(sym) = is_strlit {
-            self.toggle_strlit(sym);
-
-            if !self.in_strlit {
-                let constant = self.stash.clone();
-                self.stash.clear();
-                return Some(Token::Constant(constant))
-            }
-        }
-
-        match self.match_token() {
-            Some(token) => {
-                self.stash.clear();
-                Some(token)
-            },
-            None => {
-                warn!("failed to match '{}' at '{}:{}'", self.stash, self.line, self.column);
-                None
-            }
-        }
+        return Ok(tokens);
     }
 }
 
@@ -287,5 +244,29 @@ mod tests {
         let buf = Buffer::new(inner);
 
         Lexer::new(buf);
+    }
+
+    #[test]
+    fn syntax() {
+        let pb = "syntax = \"proto3\'";
+        let cursor = Cursor::new(pb);
+        let bf = BufReader::new(cursor);
+        let inner = Buffer::new(bf);
+
+        let mut lexer = Lexer::new(inner);
+
+        let mut expected = TokenStream::new();
+        expected.push(Token::Syntax);
+        expected.push(Token::Assign);
+        expected.push(Token::DQuote);
+        expected.push(Token::Ident("proto3".to_string()));
+        expected.push(Token::DQuote);
+
+        let actual = match lexer.token_stream() {
+            Ok(v) => v,
+            Err(e) => panic!("got error '{e }'"),
+        };
+
+        assert_eq!(expected, actual);
     }
 }

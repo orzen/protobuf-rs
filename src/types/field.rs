@@ -1,68 +1,79 @@
-use log::warn;
-use std::collections::VecDeque;
+use std::fmt::Display;
 
-use crate::*;
-use crate::position::Position;
-use crate::token::{Keyword, Sym, Token};
-use crate::types::{
-    opt::Opt,
-    field_option::FieldOption
-};
+use log::debug;
+
+use crate::error::ParserError;
+use crate::indent::indent;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
+use crate::types::field_option::FieldOption;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub name: String,
     pub typ: String,
-    pub idx: i32,
-    pub opts: FieldOption,
-    pub is_repeated: bool,
+    pub index: i32,
+    pub options: Option<FieldOption>,
+    pub repeated: bool,
 }
 
 impl Field {
-    pub fn new(name: String, typ: String, idx: i32, is_repeated: bool) -> Self {
+    pub fn new(name: String, typ: String, index: i32, repeated: bool) -> Self {
         Field {
             name,
             typ,
-            idx,
-            opts: FieldOption::new(),
-            is_repeated,
+            index,
+            options: None,
+            repeated,
         }
     }
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let first = tokens.pop_front()?;
+    pub fn set_options(&mut self, options: Option<FieldOption>) {
+        self.options = options;
+    }
+}
 
-        let repeated = matches!(first.keyword(), Some(Keyword::Repeat));
+impl TryFrom<TokenStream> for Field {
+    type Error = ParserError;
 
-        let typ = match repeated {
-            true => tokens.pop_front()?.full_ident()?,
-            false => first.full_ident()?,
+    // Parsing backwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("field({:?})", tokens);
+
+        tokens.next_is(Token::Semicolon, "field line ending(';')")?;
+
+        let options = match tokens.peek_is(Token::RBrack) {
+            true => {
+                let option_tokens = tokens.block(Token::RBrack, Token::LBrack);
+                Some(FieldOption::try_from(option_tokens)?)
+            }
+            false => None,
         };
 
-        let name = tokens.pop_front()?.ident()?;
+        let index = tokens.next_is_intlit("field index")?;
+        tokens.next_is(Token::Assign, "field assignment('=')")?;
+        let name = tokens.next_is_ident("field name")?;
+        let typ = tokens.next_is_fullident("field value")?;
+        let repeated = tokens.peek_is(Token::Repeated);
 
-        sym!("field", tokens, pos, Sym::Equal);
-        sym_back!("field", tokens, pos, Sym::Semi);
+        let mut res = Self::new(name, typ, index, repeated);
+        res.set_options(options);
 
-        let idx = tokens.pop_front()?.int()?;
+        return Ok(res);
+    }
+}
 
-        let mut field = Self::new(name, typ, idx as i32, repeated);
+impl Display for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        indent(f)?;
 
-        let mut opts = FieldOption::new();
-        if !tokens.is_empty() {
-            opts = FieldOption::from_token(tokens, pos)?;
+        if self.repeated {
+            write!(f, "repeated ")?;
         }
 
-        field.set_opts(opts);
-
-        Some(field)
-    }
-
-    pub fn push_opt(&mut self, opt: Opt) {
-        self.opts.push(opt);
-    }
-
-    pub fn set_opts(&mut self, opts: FieldOption) {
-        self.opts = opts;
+        match &self.options {
+            Some(v) => writeln!(f, "{} {} = {} {};", self.typ, self.name, self.index, v),
+            None => writeln!(f, "{} {} = {};",  self.typ, self.name, self.index),
+        }
     }
 }

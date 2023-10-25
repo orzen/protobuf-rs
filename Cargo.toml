@@ -8,4 +8,5 @@ edition = "2021"
 [dependencies]
 log = "0.4.17"
 regex = "1"
+thiserror = "1.0.40"
 tokio = { version = "1.25.0", features = ["full"] }

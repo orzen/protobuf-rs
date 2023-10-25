@@ -1,33 +1,89 @@
-use std::collections::VecDeque;
+use std::fmt::Display;
 
-use crate::token::{Keyword, Token};
+use log::debug;
+
+use crate::{error::ParserError, token::Token, token_stream::TokenStream};
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImportScope {
+    Weak,
+    Public,
+}
+
+impl TryFrom<Token> for ImportScope {
+    type Error = ParserError;
+
+    fn try_from(token: Token) -> Result<Self, Self::Error> {
+        match token {
+            Token::Weak => Ok(ImportScope::Weak),
+            Token::Public => Ok(ImportScope::Public),
+            invalid => Err(ParserError::Syntax(
+                "import scope(weak, public)".to_string(),
+                format!("{:?}", invalid),
+            )),
+        }
+    }
+}
+
+impl Display for ImportScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scope = match self {
+            Self::Public => "public",
+            Self::Weak => "weak",
+        };
+        write!(f, "{scope}")
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Import {
     pub value: String,
-    pub scope: Option<Keyword>,
+    pub scope: Option<ImportScope>,
 }
 
 impl Import {
-    pub fn new(value: String, scope: Option<Keyword>) -> Self {
-        Import { value, scope }
+    pub fn new(value: String) -> Self {
+        Import { value, scope: None }
     }
 
-    // The 'import' keyword has been consumed and this function will handle the remaining tokens.
-    pub fn from_token(mut tokens: VecDeque<Token>) -> Option<Self> {
-        let first = tokens.pop_front()?;
+    pub fn set_scope(&mut self, scope: Option<ImportScope>) {
+        self.scope = scope;
+    }
+}
 
-        let scope = match first.keyword()? {
-            Keyword::Public => Some(Keyword::Public),
-            Keyword::Weak => Some(Keyword::Weak),
-            _ => None,
-        };
+impl TryFrom<TokenStream> for Import {
+    type Error = ParserError;
 
-        let value = match scope {
-            Some(_) => tokens.pop_front()?.constant()?,
-            None => first.constant()?,
-        };
+    // Parsed backwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("import({:?})", &tokens);
 
-        Some(Import::new(value, scope))
+        tokens.next_is(Token::Semicolon, "import line ending(';')")?;
+        let value = tokens.next_is_constant("import value")?;
+
+        // Check for scope
+        let mut scope = None;
+        if !tokens.peek_is(Token::Import) {
+            scope = match tokens.next_contains(&[Token::Public, Token::Weak], "import scope") {
+                Ok(v) => Some(ImportScope::try_from(v)?),
+                Err(_) => None,
+            };
+        }
+
+        tokens.next_is(Token::Import, "import identifier")?;
+
+        let mut res = Self::new(value);
+        res.set_scope(scope);
+
+        return Ok(res);
+    }
+}
+
+impl Display for Import {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.scope {
+            Some(v) => write!(f, "import {v} \"{}\";", self.value),
+            None => write!(f, "import \"{}\";", self.value),
+        }
     }
 }

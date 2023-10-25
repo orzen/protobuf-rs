@@ -1,13 +1,9 @@
-use log::warn;
-use std::collections::VecDeque;
+use log::debug;
 
-use crate::*;
-use crate::position::Position;
-use crate::token::{Sym, Token};
-use crate::types::{
-    opt::Opt,
-    field_option::FieldOption,
-};
+use crate::error::ParserError;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
+use crate::types::field_option::FieldOption;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Map {
@@ -15,7 +11,7 @@ pub struct Map {
     key: String,
     value: String,
     index: i32,
-    opts: FieldOption,
+    options: Option<FieldOption>,
 }
 
 impl Map {
@@ -25,45 +21,44 @@ impl Map {
             key,
             value,
             index,
-            opts: FieldOption::new(),
+            options: None,
         }
     }
 
-    // The keyword 'map' has already been consumed. This function handle:
-    // <K,V> = idx [o=x];
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        sym!("map", tokens, pos, Sym::Lt);
+    pub fn set_options(&mut self, options: Option<FieldOption>) {
+        self.options = options;
+    }
+}
 
-        let key = tokens.pop_front()?.ident()?;
+impl TryFrom<TokenStream> for Map {
+    type Error = ParserError;
 
-        sym!("map", tokens, pos, Sym::Comma);
+    // Parsing backwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("map({:?})", tokens);
 
-        let val = tokens.pop_front()?.full_ident()?;
+        tokens.next_is(Token::Semicolon, "map line ending(';')")?;
 
-        sym!("map", tokens, pos, Sym::Gt);
-
-        let name = tokens.pop_front()?.ident()?;
-
-        sym!("map", tokens, pos, Sym::Equal);
-
-        let idx = tokens.pop_front()?.int()?;
-
-        sym_back!("map", tokens, pos, Sym::Semi);
-
-        let mut map = Map::new(name, key, val, idx as i32);
-
-        if tokens.len() > 1 {
-            map.set_opts(FieldOption::from_token(tokens, pos)?.inner());
+        // Check for field options
+        let mut options = None;
+        if tokens.peek_is(Token::RBrack) {
+            let option_tokens = tokens.block(Token::RBrack, Token::LBrack);
+            options = Some(FieldOption::try_from(option_tokens)?);
         }
 
-        Some(map)
-    }
+        let index = tokens.next_is_intlit("map index")?;
+        tokens.next_is(Token::Assign, "map assigment('=')")?;
+        let name = tokens.next_is_ident("map name")?;
+        tokens.next_is(Token::GT, "map closing('>')")?;
+        let value = tokens.next_is_fullident("map value type")?;
+        tokens.next_is(Token::Comma, "map key-value delimiter(',')")?;
+        let key = tokens.next_is_ident("map key type")?;
+        tokens.next_is(Token::LT, "map opening('<')")?;
+        tokens.next_is(Token::Map, "map identifier")?;
 
-    pub fn push_opt(&mut self, o: Opt) {
-        self.opts.push(o);
-    }
+        let mut map = Self::new(name, key, value, index);
+        map.set_options(options);
 
-    pub fn set_opts(&mut self, i: Vec<Opt>) {
-        self.opts.set_inner(i);
+        return Ok(map);
     }
 }

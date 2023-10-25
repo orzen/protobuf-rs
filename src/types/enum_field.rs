@@ -1,56 +1,71 @@
-use crate::fmt_ident;
-use crate::position::Position;
-use crate::token::{Sym, Token};
+use std::fmt::Display;
+use log::debug;
+
+use crate::error::ParserError;
+use crate::indent::indent;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
 use crate::types::field_option::FieldOption;
-use crate::types::opt::Opt;
-use std::collections::VecDeque;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EnumField {
     pub name: String,
     pub index: i32,
-    pub opts: FieldOption,
+    pub options: Option<FieldOption>,
 }
 
 impl EnumField {
     pub fn new(name: String, index: i32) -> Self {
-        EnumField { name, index, opts: FieldOption::new() }
-    }
-
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let name = tokens.pop_front()?.ident()?;
-
-        // Check that the next token is the equal sign that separates the field name and the index
-        // also check that the ends with a semi colon.
-        if !tokens.pop_front()?.sym()?.eq(&Sym::Equal) || !tokens.pop_back()?.sym()?.eq(&Sym::Semi)
-        {
-            return None;
+        EnumField {
+            name,
+            index,
+            options: None,
         }
+    }
 
-        let index = tokens.pop_front()?.int()?;
+    pub fn set_options(&mut self, options: Option<FieldOption>) {
+        self.options = options;
+    }
+}
 
-        // Note: Casting i64 to i32 here. This should be fine because index values should not reach
-        // higher than the i32_MAX.
-        let mut field = EnumField::new(name, index as i32);
+impl TryFrom<TokenStream> for EnumField {
+    type Error = ParserError;
 
-        // There should not be any tokens remaining unless there's field options so lets try and
-        // parse field options.
-        if !tokens.is_empty() {
-            field.set_opts(FieldOption::from_token(tokens, pos)?);
+    // Parsing backwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("enum field({:?})", tokens);
+
+        tokens.next_is(Token::Semicolon, "enum field line ending(';')")?;
+
+        // Handle field options
+        let options = match tokens.peek_is(Token::RBrack) {
+            true => {
+                let option_tokens = tokens.block(Token::RBrack, Token::LBrace);
+                Some(FieldOption::try_from(option_tokens)?)
+            }
+            false => None,
+        };
+
+        // Note index could be a negative integer according to spec.
+        // https://protobuf.dev/reference/protobuf/proto3-spec/#enum_definition
+        let index = tokens.next_is_intlit("enum field index")?;
+        tokens.next_is(Token::Assign, "enum field assignment('=')")?;
+        let name = tokens.next_is_ident("enum field name")?;
+
+        let mut res = Self::new(name, index);
+        res.set_options(options);
+
+        return Ok(res);
+    }
+}
+
+impl Display for EnumField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        indent(f)?;
+
+        match &self.options {
+            Some(v) => writeln!(f, "{} = {} {v};", self.name, self.index),
+            None => writeln!(f, "{} = {};", self.name, self.index),
         }
-
-        Some(field)
-    }
-
-    pub fn push_opt(&mut self, opt: Opt) {
-        self.opts.push(opt);
-    }
-
-    pub fn set_opts(&mut self, opts: FieldOption) {
-        self.opts = opts;
-    }
-
-    pub fn to_string(&self, n: u8) -> String {
-        fmt_ident!(n, "{} = {}{};", self.name, self.index, self.opts)
     }
 }

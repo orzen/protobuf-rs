@@ -1,14 +1,14 @@
-use log::warn;
-use std::collections::VecDeque;
+use std::fmt::Display;
+use std::ops::Deref;
+use log::debug;
 
-use crate::position::Position;
-use crate::token::{Sym, Token};
-use crate::types::opt::Opt;
-use crate::*;
+use crate::error::ParserError;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RpcOption {
-    inner: Vec<Opt>,
+    inner: Vec<(String, String)>,
 }
 
 impl RpcOption {
@@ -16,50 +16,61 @@ impl RpcOption {
         Default::default()
     }
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let mut rpc_opt = Self::new();
+    pub fn push(&mut self, opt: (String, String)) {
+        self.inner.push(opt);
+    }
+}
 
-        // Check for wrapping hardbrackets
-        if tokens.pop_front()?.sym()? != Sym::Curly0 || tokens.pop_back()?.sym()? != Sym::Curly1 {
-            warn!("rpc option miss wrapping brackets, {}", pos.near());
-            return None;
-        }
+impl Deref for RpcOption {
+    type Target = Vec<(String, String)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl TryFrom<TokenStream> for RpcOption {
+    type Error = ParserError;
+
+    // Parsing forwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("rpc option: {:?}", tokens);
+
+        let mut opt = RpcOption::new();
+
+        tokens.next_is(Token::LBrace, "rpc option opening brace('{')")?;
 
         while !tokens.is_empty() {
-            // Take token index 0,1,2 from the front which should correspond with: "key = value".
-            // This should contain `key = value ,`
-            let entry: Vec<Token> = tokens.drain(..2).collect();
-            if entry.is_empty() {
-                warn!("rpc option expected pair, got none {}", pos.near());
-            }
+            tokens.next_is(Token::Option, "rpc option identifier")?;
+            // TODO handle custom option
+            let name = tokens.next_is_fullident("rpc option name")?;
+            tokens.next_is(Token::Assign, "rpc option assignment('=')")?;
+            let value = tokens.next_is_constant("rpc option value")?;
 
-            let key = entry[0].full_ident()?;
-            let value = entry[2].constant()?;
+            opt.push((name, value));
 
-            sym!("rpc option", tokens, pos, Sym::Equal);
-
-            rpc_opt.push(Opt::new(key, value));
-
-            // Break and skip the comma check when field option is out of pairs
-            if tokens.is_empty() {
+            if tokens.peek_is(Token::RBrace) {
                 break;
             }
 
-            sym!("rpc option", tokens, pos, Sym::Comma);
+            tokens.next_is(Token::Comma, "rpc option delimiter(';')")?;
         }
 
-        Some(rpc_opt)
-    }
+        tokens.next_is(Token::RBrace, "rpc option closing brace('{')")?;
 
-    pub fn inner(&self) -> Vec<Opt> {
-        self.inner.clone()
+        Ok(opt)
     }
+}
 
-    pub fn set_inner(&mut self, i: Vec<Opt>) {
-        self.inner = i;
-    }
+impl Display for RpcOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let values: String = self
+            .inner
+            .iter()
+            .map(|(k, v)| format!("option {k} = {v};"))
+            .collect::<Vec<String>>()
+            .join(" ");
 
-    pub fn push(&mut self, o: Opt) {
-        self.inner.push(o);
+        write!(f, "{{{values}}}")
     }
 }

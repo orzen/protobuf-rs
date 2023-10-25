@@ -1,14 +1,12 @@
-use log::warn;
-use std::collections::VecDeque;
+use log::debug;
+use std::fmt::Display;
 
-use crate::position::Position;
-use crate::sym;
-use crate::token::{
-    Sym,
-    Token,
-};
+use crate::error::ParserError;
+use crate::indent::indent;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub value: String,
 }
@@ -17,24 +15,26 @@ impl Package {
     pub fn new(value: String) -> Self {
         Package { value }
     }
+}
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let value = tokens.pop_front()?.full_ident()?;
+impl TryFrom<TokenStream> for Package {
+    type Error = ParserError;
 
-        sym!("package", tokens, pos, Sym::Semi);
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("package({:?})", &tokens);
 
-        Some(Self::new(value))
+        tokens.next_is(Token::Semicolon, "package line ending(';')")?;
+        let value = tokens.next_is_fullident("package value")?;
+        tokens.next_is(Token::Package, "package identifier")?;
+
+        Ok(Self::new(value))
     }
 }
 
-impl Default for Package {
-    fn default() -> Self {
-        Self::new(String::new())
-    }
-}
+impl Display for Package {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        indent(f)?;
 
-impl ToString for Package {
-    fn to_string(&self) -> String {
-        format!("package \"{}\"\n", self.value)
+        writeln!(f, "package {};", self.value)
     }
 }

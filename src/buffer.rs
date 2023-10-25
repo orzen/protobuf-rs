@@ -1,25 +1,47 @@
+use std::str::Chars;
 use std::io::{BufReader, Read};
-use log::info;
+
+use log::warn;
+
+use crate::error::BufferError;
 
 pub struct Buffer<T> {
     inner: BufReader<T>,
+    buf: String,
 }
 
 impl<T: Read> Buffer<T> {
     pub fn new(inner: BufReader<T>) -> Self {
         Self {
             inner,
+            buf: String::new(),
         }
     }
 
-    pub fn next(&mut self) -> Option<String> {
-        let mut line = String::new();
-        match self.inner.read_to_string(&mut line) {
-            Ok(_) => Some(line),
+    pub fn read(&mut self) -> Result<usize, BufferError> {
+        self.buf.clear();
+        let size = self.inner.read_to_string(&mut self.buf)?;
+        if size == 0 {
+            return Err(BufferError::EOF);
+        }
+
+        return Ok(size);
+    }
+
+    pub fn next(&mut self) -> Option<Chars<'_>> {
+        match self.read() {
+            Ok(size) => {
+                if size == 0 {
+                    None
+                } else {
+                    Some(self.buf.chars())
+                }
+            }
             Err(e) => {
-                info!("buffer read line: {}", e);
+                warn!("buffer read error: {e}");
                 None
             }
         }
     }
 }
+

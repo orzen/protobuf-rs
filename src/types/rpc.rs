@@ -1,17 +1,18 @@
-use log::warn;
-use std::collections::VecDeque;
+use std::fmt::Display;
+use log::debug;
 
-use crate::position::Position;
-use crate::{keyword, sym, sym_back};
-use crate::token::{Keyword, Sym, Token};
-use crate::types::{opt::Opt, rpc_option::RpcOption};
+use crate::error::ParserError;
+use crate::indent::indent;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
+use crate::types::rpc_option::RpcOption;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rpc {
     pub name: String,
     pub arg: String,
     pub ret: String,
-    pub opts: RpcOption,
+    pub options: Option<RpcOption>,
     pub stream_arg: bool,
     pub stream_ret: bool,
 }
@@ -22,90 +23,92 @@ impl Rpc {
             name,
             arg,
             ret,
-            opts: RpcOption::new(),
+            options: None,
             stream_arg,
             stream_ret,
         }
     }
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let mut stream_arg = false;
-        let mut stream_ret = false;
-        let arg: String;
-        let ret: String;
-
-        let name = tokens.pop_front()?.ident()?;
-
-        // Request definition
-
-        sym!("rpc", tokens, pos, Sym::Par0);
-
-        match tokens.pop_front()?.keyword() {
-            Some(Keyword::Stream) => {
-                stream_arg = true;
-                arg = tokens.pop_front()?.full_ident()?;
-            }
-            Some(other) => {
-                warn!(
-                    "rpc expected 'stream' or request, got '{:?}' {}",
-                    other,
-                    pos.near()
-                );
-                return None;
-            }
-            None => {
-                arg = tokens.pop_front()?.full_ident()?;
-            }
-        }
-
-        sym!("rpc", tokens, pos, Sym::Par1);
-
-        // Response definition
-
-        keyword!("rpc", tokens, pos, Keyword::Returns);
-
-        sym!("rpc", tokens, pos, Sym::Par0);
-
-        match tokens.pop_front()?.keyword() {
-            Some(Keyword::Stream) => {
-                stream_ret = true;
-                ret = tokens.pop_front()?.full_ident()?;
-            }
-            Some(other) => {
-                warn!(
-                    "rpc expected 'stream' or request, got '{:?}' {}",
-                    other,
-                    pos.near()
-                );
-                return None;
-            }
-            None => {
-                ret = tokens.pop_front()?.full_ident()?;
-            }
-        }
-
-        sym!("rpc", tokens, pos, Sym::Par1);
-
-        // Ending, option or empty statement
-
-        sym_back!("rpc", tokens, pos, Sym::Semi);
-
-        let mut opts = RpcOption::new();
-        if !tokens.is_empty() {
-            opts = RpcOption::from_token(tokens, pos)?;
-        }
-
-        let mut r = Rpc::new(name, arg, ret, stream_arg, stream_ret);
-        r.set_opts(opts);
-
-        Some(r)
+    pub fn set_options(&mut self, options: Option<RpcOption>) {
+        self.options = options;
     }
+}
 
-    pub fn push_opt(&mut self, o: Opt) {
-        self.opts.push(o);
+impl TryFrom<TokenStream> for Rpc {
+    type Error = ParserError;
+
+    // Parsing backwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("rpc({:?})", tokens);
+
+        tokens.next_is(Token::Semicolon, "line ending(';')")?;
+
+        // Check for RPC options
+        let options = match tokens.peek_is(Token::RBrace) {
+            true => {
+                let option_tokens = tokens.block(Token::RBrace, Token::LBrace);
+                Some(RpcOption::try_from(option_tokens)?)
+            }
+            false => None,
+        };
+
+        // Handle return value
+        tokens.next_is(Token::RParen, "rpc closing return parenthesis(')')")?;
+        let ret = tokens.next_is_fullident("rpc return type")?;
+
+        // Check for streamed return
+        let stream_ret = tokens.peek_is(Token::Stream);
+        if stream_ret {
+            // Pop one since we used peek to determine the stream_ret
+            tokens.pop();
+        }
+
+        tokens.next_is(Token::LParen, "rpc opening return parenthesis('(')")?;
+        tokens.next_is(Token::Returns, "rpc returns")?;
+
+        // Handle argument
+        tokens.next_is(Token::RParen, "rpc closing argument parenthesis(')')")?;
+        let arg = tokens.next_is_fullident("rpc argument type")?;
+
+        // Check for streamed argument
+        let stream_arg = tokens.peek_is(Token::Stream);
+        if stream_arg {
+            // Pop one since we used peek to determine the stream_arg
+            tokens.pop();
+        }
+
+        tokens.next_is(Token::LParen, "rpc opening argument parenthesis('(')")?;
+
+        let name = tokens.next_is_ident("rpc name")?;
+
+        tokens.next_is(Token::RPC, "rpc identifier")?;
+
+        let mut res = Rpc::new(name, arg, ret, stream_arg, stream_ret);
+        res.set_options(options);
+
+        return Ok(res);
     }
+}
 
-    pub fn set_opts(&mut self, opts: RpcOption) {
-        self.opts = opts;
+impl Display for Rpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        indent(f)?;
+
+        write!(f, "rpc {} ", self.name)?;
+
+        match self.stream_arg {
+            true => write!(f, "(stream {}) ", self.arg)?,
+            false => write!(f, "({}) ", self.arg)?,
+        }
+
+        match self.stream_ret {
+            true => write!(f, "returns (stream {})", self.ret)?,
+            false => write!(f, "returns ({})", self.ret)?,
+        }
+
+        match &self.options {
+            Some(v) => write!(f, " {v};"),
+            None => write!(f, ";"),
+        }
     }
 }

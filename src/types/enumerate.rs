@@ -1,91 +1,111 @@
-use log::warn;
-use std::collections::VecDeque;
+use log::debug;
+use std::fmt::Display;
 
-use crate::position::Position;
-use crate::token::{Keyword, Token};
+use crate::error::ParserError;
+use crate::indent::{indent, level};
+use crate::token::Token;
+use crate::token_stream::TokenStream;
 use crate::types::enum_field::EnumField;
-use crate::types::opt::Opt;
+use crate::types::option_field::OptionField;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EnumMember {
+    Field(EnumField),
+    Option(OptionField),
+}
+
+impl From<EnumField> for EnumMember {
+    fn from(value: EnumField) -> Self {
+        Self::Field(value)
+    }
+}
+
+impl From<OptionField> for EnumMember {
+    fn from(value: OptionField) -> Self {
+        Self::Option(value)
+    }
+}
+
+impl Display for EnumMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Enum {
     pub name: String,
-    pub fields: Vec<EnumField>,
-    pub opts: Vec<Opt>,
+    pub members: Vec<EnumMember>,
 }
 
 impl Enum {
     pub fn new(name: String) -> Self {
-        let fields: Vec<EnumField> = Vec::new();
-        let opts: Vec<Opt> = Vec::new();
-
-        Enum { name, fields, opts }
+        Enum {
+            name,
+            members: vec![],
+        }
     }
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Enum> {
-        let name = tokens.pop_front()?.ident()?;
-        let mut enumerate = Enum::new(name);
-
-        if tokens.is_empty() {
-            warn!("enum with empty block {}", pos.near());
-        }
-
-        while !tokens.is_empty() {
-            let mut line = Token::as_line(&mut tokens);
-
-            // Will return if token is empty
-            let token = match line.pop_front() {
-                Some(t) => t,
-                None => return Some(enumerate),
-            };
-
-            // First token decides if the line is an option or a field
-            match token.keyword() {
-                // Option
-                Some(Keyword::Opt) => enumerate.push_opt(Opt::from_token(line, pos)?),
-                // Invalid
-                Some(other) => {
-                    warn!(
-                        "enum expected option or field, got {:?} {}",
-                        other,
-                        pos.near()
-                    );
-                }
-                // Field
-                None => {
-                    // Put back the token used for peeking
-                    line.push_front(token);
-                    let field = match EnumField::from_token(line, pos) {
-                        Some(f) => f,
-                        None => return Some(enumerate),
-                    };
-                    enumerate.push_field(field)
-                }
-            }
-        }
-
-        Some(enumerate)
-    }
-
-    pub fn push_field(&mut self, f: EnumField) {
-        self.fields.push(f)
-    }
-
-    pub fn push_opt(&mut self, o: Opt) {
-        self.opts.push(o)
-    }
-
-    pub fn to_string(&self, n: u8) -> String {
-        let s = String::new();
-
-
-        for opt in self.opts {
-            s.push_str(opt.to_string(n).as_str());
-        }
-
-        for fld in self.fields {
-            s.push_str(fld.to_string(n).as_str());
-        }
-
-        s
+    pub fn push(&mut self, member: EnumMember) {
+        self.members.push(member);
     }
 }
+
+impl TryFrom<TokenStream> for Enum {
+    type Error = ParserError;
+
+    // Parsing forwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("enum({:?})", tokens);
+
+        tokens.next_is(Token::Enum, "enum identifier")?;
+        let name = tokens.next_is_ident("enum name")?;
+        tokens.next_is(Token::LBrace, "enum opening brace('{')")?;
+
+        let mut enm = Enum::new(name);
+
+        // Handle enum body
+        while !tokens.is_empty() {
+            let member = match tokens.peek_is(Token::Option) {
+                true => {
+                    let line = tokens.line(Token::Semicolon);
+                    EnumMember::from(OptionField::try_from(line)?)
+                }
+                false => {
+                    let line = tokens.line(Token::Semicolon);
+                    EnumMember::from(EnumField::try_from(line)?)
+                }
+            };
+
+            enm.push(member);
+        }
+
+        tokens.next_is(Token::RBrace, "enum closing brace('}')")?;
+
+        return Ok(enm);
+    }
+}
+
+impl Display for Enum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let i = level(f);
+        indent(f)?;
+
+        writeln!(f, "enum {} {{", self.name)?;
+        for member in &self.members {
+            writeln!(f, "{:indent$}", member, indent = i+1)?;
+        }
+        writeln!(f, "}}")
+    }
+}
+
+//#[cfg(test)]
+//mod tests {
+//    use crate::load_file;
+//
+//    #[test]
+//    fn to_string() {
+//        let p = load_file("example.proto");
+//        assert_eq!(p, None, "empty proto");
+//    }
+//}

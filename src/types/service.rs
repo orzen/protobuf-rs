@@ -1,62 +1,110 @@
-use log::warn;
-use std::collections::VecDeque;
+use log::debug;
+use std::fmt::Display;
 
-use crate::position::Position;
-use crate::token::{Keyword, Token};
-use crate::types::{
-    rpc::Rpc,
-    opt::Opt,
-};
+use crate::error::ParserError;
+use crate::indent::{indent, level};
+use crate::token::Token;
+use crate::token_stream::TokenStream;
+use crate::types::option_field::OptionField;
+use crate::types::rpc::Rpc;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServiceMember {
+    Option(OptionField),
+    RPC(Rpc),
+}
+
+impl From<OptionField> for ServiceMember {
+    fn from(value: OptionField) -> Self {
+        ServiceMember::Option(value)
+    }
+}
+
+impl From<Rpc> for ServiceMember {
+    fn from(value: Rpc) -> Self {
+        ServiceMember::RPC(value)
+    }
+}
+
+impl Display for ServiceMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Service {
     pub name: String,
-    pub opts: Vec<Opt>,
-    pub rpcs: Vec<Rpc>,
+    pub members: Vec<ServiceMember>,
 }
 
 impl Service {
     pub fn new(name: String) -> Self {
-        let opts: Vec<Opt> = Vec::new();
-        let rpcs: Vec<Rpc> = Vec::new();
-
-        Service { name, opts, rpcs }
+        Service {
+            name,
+            members: vec![],
+        }
     }
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let name = tokens.pop_front()?.ident()?;
-        let mut service = Service::new(name);
+    pub fn push(&mut self, member: ServiceMember) {
+        self.members.push(member);
+    }
+}
+
+impl TryFrom<TokenStream> for Service {
+    type Error = ParserError;
+
+    // Parsing forwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("service({:?})", &tokens);
+
+        tokens.next_is(Token::Service, "service identifier")?;
+        let name = tokens.next_is_fullident("service name")?;
+        tokens.next_is(Token::LBrace, "serice opening brace('{')")?;
+
+        let mut service = Service::new(name.to_string());
 
         while !tokens.is_empty() {
-            let kw = tokens.pop_front()?.keyword();
-            let line = Token::as_line(&mut tokens);
-
-            match kw {
-                Some(Keyword::Opt) => match Opt::from_token(line, pos) {
-                    Some(opt) => service.push_opt(opt),
-                    None => warn!("service expected option, got none {}", pos.near()),
-                },
-                Some(Keyword::Rpc) => match Rpc::from_token(line, pos) {
-                    Some(rpc) => service.push_rpc(rpc),
-                    None => warn!("service expected rpc, got none {}", pos.near()),
-                },
-                Some(other) => {
-                    warn!("expected option or rpc for service, got {:?} {}", other, pos.near())
+            let member = match tokens.last() {
+                Some(Token::Option) => {
+                    let option_tokens = tokens.line(Token::Semicolon);
+                    ServiceMember::from(OptionField::try_from(option_tokens)?)
+                }
+                Some(Token::RPC) => {
+                    let rpc_tokens = tokens.line(Token::Semicolon);
+                    ServiceMember::from(Rpc::try_from(rpc_tokens)?)
+                }
+                Some(invalid) => {
+                    return Err(ParserError::Syntax(
+                        "service member".to_string(),
+                        format!("{:?}", invalid),
+                    ))
                 }
                 None => {
-                    warn!("expected keyword for service, got none {}", pos.near());
+                    return Err(ParserError::Syntax(
+                        "service option or rpc".to_string(),
+                        "nothing".to_string(),
+                    ))
                 }
-            }
+            };
+
+            service.push(member);
         }
 
-        Some(service)
-    }
+        tokens.next_is(Token::RBrace, "service closing brace('}')")?;
 
-    pub fn push_opt(&mut self, opt: Opt) {
-        self.opts.push(opt)
+        Ok(service)
     }
+}
 
-    pub fn push_rpc(&mut self, rpc: Rpc) {
-        self.rpcs.push(rpc)
+impl Display for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let i = level(f);
+        indent(f)?;
+        writeln!(f, "service {} {{", self.name)?;
+        for member in &self.members {
+            writeln!(f, "{:indent$}", member, indent = i + 1)?;
+        }
+        writeln!(f, "}}")
     }
 }

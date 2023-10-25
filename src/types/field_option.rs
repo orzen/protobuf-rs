@@ -1,18 +1,16 @@
-use log::warn;
-use std::collections::VecDeque;
-
-use crate::*;
-use crate::position::Position;
-use crate::token::{Sym, Token};
-use crate::types::opt::Opt;
-
-
 // Options following a field e.g. "int32 foo = 0 [packed=true];"
 //                                               ^^^^^^^^^^^^^
+use log::debug;
+use std::ops::Deref;
+use std::fmt::Display;
+
+use crate::error::ParserError;
+use crate::token::Token;
+use crate::token_stream::TokenStream;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FieldOption {
-    inner: Vec<Opt>,
+    inner: Vec<(String, String)>,
 }
 
 impl FieldOption {
@@ -20,69 +18,59 @@ impl FieldOption {
         Default::default()
     }
 
-    pub fn from_token(mut tokens: VecDeque<Token>, pos: Position) -> Option<Self> {
-        let mut fld_opt = Self::new();
+    pub fn push(&mut self, opt: (String, String)) {
+        self.inner.push(opt);
+    }
+}
 
-        // Check for wrapping hardbrackets
-        if !tokens.pop_front()?.sym()?.eq(&Sym::Hard0) || !tokens.pop_back()?.sym()?.eq(&Sym::Hard1)
-        {
-            warn!("field option miss wrapping brackets, {}", pos.near());
-            return None;
-        }
+impl Deref for FieldOption {
+    type Target = Vec<(String, String)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl TryFrom<TokenStream> for FieldOption {
+    type Error = ParserError;
+
+    // Parsing forwards
+    fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
+        debug!("field option({:?})", tokens);
+
+        let mut opt = FieldOption::new();
+
+        tokens.next_is(Token::LBrack, "field option opening bracket('[')")?;
 
         while !tokens.is_empty() {
-            let mut opt_tokens: VecDeque<Token> = VecDeque::new();
-            while let Some(tok) = tokens.pop_front() {
-                match tok {
-                    Token::Symbol(Sym::Comma) => break,
-                    other => opt_tokens.push_back(other),
-                }
-            }
-            // Take token index 0,1,2 from the front which should correspond with: "key = value".
-            // This should contain `key = value ,`
-            let entry: Vec<Token> = tokens.drain(..2).collect();
-            if entry.is_empty() {
-                warn!("field option expected pair, got none {}", pos.near())
-            }
+            let name = tokens.next_is_fullident("field option name")?;
+            tokens.next_is(Token::Assign, "field option assignment('=')")?;
+            let value = tokens.next_is_constant("field option value")?;
 
-            let key = entry[0].full_ident()?;
-            let value = entry[2].constant()?;
+            opt.push((name, value));
 
-            if !entry[1].sym()?.eq(&Sym::Equal) {
-                warn!(
-                    "field option expected '=' between key and value, got '{:?}' {}",
-                    entry[1], pos.near()
-                );
-                return None;
-            }
-
-            fld_opt.push(Opt::new(key, value));
-
-            // Break and skip the comma check when field option is out of pairs
-            if tokens.is_empty() {
+            if tokens.peek_is(Token::RBrack) {
                 break;
             }
 
-            sym!("field option", tokens, pos, Sym::Comma);
+            tokens.next_is(Token::Comma, "field option delimiter(',')")?;
         }
 
-        Some(fld_opt)
-    }
+        tokens.next_is(Token::RBrace, "field option closing bracket(']')")?;
 
-    pub fn inner(&self) -> Vec<Opt> {
-        self.inner.clone()
+        Ok(opt)
     }
+}
 
-    pub fn set_inner(&mut self, i: Vec<Opt>) {
-        self.inner = i;
-    }
+impl Display for FieldOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let values: String = self
+            .inner
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<String>>()
+            .join(",");
 
-    pub fn push(&mut self, o: Opt) {
-        self.inner.push(o);
-    }
-
-    pub fn to_string(&self, n: u8) {
-        let i = (0..n).map(|_| "\t").collect::<String>();
-        for 
+        write!(f, "[{values}]")
     }
 }
