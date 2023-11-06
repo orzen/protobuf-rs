@@ -5,15 +5,25 @@ use crate::error::ParserError;
 use crate::lexer::Lexer;
 use crate::types::proto::Proto;
 
-pub fn load<T>(buf: Buffer<T>) -> Result<Proto, ParserError>
-where
-    T: Read,
-{
-    let mut lexer = Lexer::new();
-    let tokens = lexer.token_stream(buf)?;
-
-    Proto::try_from(tokens)
+pub struct Parser {
 }
+
+impl Parser {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn load<T>(&self, buf: Buffer<T>) -> Result<Proto, ParserError>
+    where
+        T: Read,
+    {
+        let mut lexer = Lexer::new()?;
+        let tokens = lexer.token_stream(buf)?;
+
+        Proto::try_from(tokens)
+    }
+}
+
 
 //#[cfg(test)]
 //mod tests {

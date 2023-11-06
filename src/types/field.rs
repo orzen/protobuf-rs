@@ -4,7 +4,7 @@ use log::debug;
 
 use crate::error::ParserError;
 use crate::indent::indent;
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 use crate::types::field_option::FieldOption;
 
@@ -40,21 +40,21 @@ impl TryFrom<TokenStream> for Field {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("field({:?})", tokens);
 
-        tokens.next_is(Token::Semicolon, "field line ending(';')")?;
+        tokens.next_eq(Type::Semicolon, "field line ending(';')")?;
 
-        let options = match tokens.peek_is(Token::RBrack) {
+        let options = match tokens.peek_eq(Type::RBrack) {
             true => {
-                let option_tokens = tokens.block(Token::RBrack, Token::LBrack);
+                let option_tokens = tokens.select_block(Type::RBrack, Type::LBrack);
                 Some(FieldOption::try_from(option_tokens)?)
             }
             false => None,
         };
 
-        let index = tokens.next_is_intlit("field index")?;
-        tokens.next_is(Token::Assign, "field assignment('=')")?;
-        let name = tokens.next_is_ident("field name")?;
-        let typ = tokens.next_is_fullident("field value")?;
-        let repeated = tokens.peek_is(Token::Repeated);
+        let index = tokens.intlit_as_i32("field index")?;
+        tokens.next_eq(Type::Assign, "field assignment('=')")?;
+        let name = tokens.ident_as_string("field name")?;
+        let typ = tokens.fullident_as_string("field value")?;
+        let repeated = tokens.peek_eq(Type::Repeated);
 
         let mut res = Self::new(name, typ, index, repeated);
         res.set_options(options);

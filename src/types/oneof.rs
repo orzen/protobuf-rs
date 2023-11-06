@@ -3,21 +3,35 @@ use log::debug;
 
 use crate::error::ParserError;
 use crate::indent::{indent, level};
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
-
 use crate::types::field::Field;
 use crate::types::option_field::OptionField;
+use crate::types::comment::{BlockComment, LineComment};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OneofMember {
+    BlockComment(BlockComment),
     Field(Field),
+    LineComment(LineComment),
     Option(OptionField),
+}
+
+impl From<BlockComment> for OneofMember {
+    fn from(value: BlockComment) -> Self {
+        Self::BlockComment(value)
+    }
 }
 
 impl From<Field> for OneofMember {
     fn from(value: Field) -> Self {
         Self::Field(value)
+    }
+}
+
+impl From<LineComment> for OneofMember {
+    fn from(value: LineComment) -> Self {
+        Self::LineComment(value)
     }
 }
 
@@ -59,32 +73,49 @@ impl TryFrom<TokenStream> for Oneof {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("oneof({:?})", tokens);
 
-        tokens.next_is(Token::Oneof, "oneof identifier")?;
-        let name = tokens.next_is_ident("oneof name")?;
-        tokens.next_is(Token::LBrace, "oneof opening brace('{')")?;
+        tokens.next_eq(Type::Oneof, "oneof identifier")?;
+        let name = tokens.ident_as_string("oneof name")?;
+        tokens.next_eq(Type::LBrace, "oneof opening brace('{')")?;
 
         let mut res = Self::new(name);
 
         while !tokens.is_empty() {
-            if tokens.peek_is(Token::RBrace) {
-                break;
-            }
+            let peek_token = match tokens.peek() {
+                Some(v) => v,
+                None => return Err(ParserError::Syntax("oneof member".to_string(), "unexpected oneof ending".to_string())),
+            };
 
-            let member = match tokens.peek_is(Token::Option) {
-                true => {
-                    let option_tokens = tokens.line(Token::Semicolon);
+            let member = match peek_token.typ() {
+                Type::Option => {
+                    let option_tokens = tokens.select_until(Type::Semicolon);
                     OneofMember::from(OptionField::try_from(option_tokens)?)
                 }
-                false => {
-                    let field_tokens = tokens.line(Token::Semicolon);
+                Type::Slash => {
+                    if tokens.is_line_comment() {
+                        let line = tokens.select_line_comment()?;
+                        OneofMember::from(LineComment::from(line))
+                    } else if tokens.is_block_comment() {
+                        let block = tokens.select_block_comment()?;
+                        OneofMember::from(BlockComment::from(block))
+                    } else {
+                        return Err(ParserError::Syntax(
+                            "oneof comment".to_string(),
+                            format!("oneof tokens: {tokens}"),
+                        ));
+                    }
+                }
+                Type::RBrace => break,
+                _field => {
+                    let field_tokens = tokens.select_until(Type::Semicolon);
                     OneofMember::from(Field::try_from(field_tokens)?)
+
                 }
             };
 
             res.push(member);
         }
 
-        tokens.next_is(Token::RBrace, "oneof closing brace('}')")?;
+        tokens.next_eq(Type::RBrace, "oneof closing brace('}')")?;
 
         return Ok(res);
     }

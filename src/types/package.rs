@@ -3,7 +3,7 @@ use std::fmt::Display;
 
 use crate::error::ParserError;
 use crate::indent::indent;
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -23,9 +23,9 @@ impl TryFrom<TokenStream> for Package {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("package({:?})", &tokens);
 
-        tokens.next_is(Token::Semicolon, "package line ending(';')")?;
-        let value = tokens.next_is_fullident("package value")?;
-        tokens.next_is(Token::Package, "package identifier")?;
+        tokens.next_eq(Type::Semicolon, "package line ending(';')")?;
+        let value = tokens.fullident_as_string("package value")?;
+        tokens.next_eq(Type::Package, "package identifier")?;
 
         Ok(Self::new(value))
     }

@@ -1,7 +1,7 @@
 use log::debug;
 
 use crate::error::ParserError;
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 use crate::types::field_option::FieldOption;
 
@@ -37,24 +37,24 @@ impl TryFrom<TokenStream> for Map {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("map({:?})", tokens);
 
-        tokens.next_is(Token::Semicolon, "map line ending(';')")?;
+        tokens.next_eq(Type::Semicolon, "map line ending(';')")?;
 
         // Check for field options
         let mut options = None;
-        if tokens.peek_is(Token::RBrack) {
-            let option_tokens = tokens.block(Token::RBrack, Token::LBrack);
+        if tokens.peek_eq(Type::RBrack) {
+            let option_tokens = tokens.select_block(Type::RBrack, Type::LBrack);
             options = Some(FieldOption::try_from(option_tokens)?);
         }
 
-        let index = tokens.next_is_intlit("map index")?;
-        tokens.next_is(Token::Assign, "map assigment('=')")?;
-        let name = tokens.next_is_ident("map name")?;
-        tokens.next_is(Token::GT, "map closing('>')")?;
-        let value = tokens.next_is_fullident("map value type")?;
-        tokens.next_is(Token::Comma, "map key-value delimiter(',')")?;
-        let key = tokens.next_is_ident("map key type")?;
-        tokens.next_is(Token::LT, "map opening('<')")?;
-        tokens.next_is(Token::Map, "map identifier")?;
+        let index = tokens.intlit_as_i32("map index")?;
+        tokens.next_eq(Type::Assign, "map assigment('=')")?;
+        let name = tokens.ident_as_string("map name")?;
+        tokens.next_eq(Type::GT, "map closing('>')")?;
+        let value = tokens.fullident_as_string("map value type")?;
+        tokens.next_eq(Type::Comma, "map key-value delimiter(',')")?;
+        let key = tokens.ident_as_string("map key type")?;
+        tokens.next_eq(Type::LT, "map opening('<')")?;
+        tokens.next_eq(Type::Map, "map identifier")?;
 
         let mut map = Self::new(name, key, value, index);
         map.set_options(options);

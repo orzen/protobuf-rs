@@ -3,7 +3,7 @@ use std::ops::Deref;
 use log::debug;
 
 use crate::error::ParserError;
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,25 +38,25 @@ impl TryFrom<TokenStream> for RpcOption {
 
         let mut opt = RpcOption::new();
 
-        tokens.next_is(Token::LBrace, "rpc option opening brace('{')")?;
+        tokens.next_eq(Type::LBrace, "rpc option opening brace('{')")?;
 
         while !tokens.is_empty() {
-            tokens.next_is(Token::Option, "rpc option identifier")?;
+            tokens.next_eq(Type::Option, "rpc option identifier")?;
             // TODO handle custom option
-            let name = tokens.next_is_fullident("rpc option name")?;
-            tokens.next_is(Token::Assign, "rpc option assignment('=')")?;
-            let value = tokens.next_is_constant("rpc option value")?;
+            let name = tokens.fullident_as_string("rpc option name")?;
+            tokens.next_eq(Type::Assign, "rpc option assignment('=')")?;
+            let value = tokens.constant_as_string("rpc option value")?;
 
             opt.push((name, value));
 
-            if tokens.peek_is(Token::RBrace) {
+            if tokens.peek_eq(Type::RBrace) {
                 break;
             }
 
-            tokens.next_is(Token::Comma, "rpc option delimiter(';')")?;
+            tokens.next_eq(Type::Comma, "rpc option delimiter(';')")?;
         }
 
-        tokens.next_is(Token::RBrace, "rpc option closing brace('{')")?;
+        tokens.next_eq(Type::RBrace, "rpc option closing brace('{')")?;
 
         Ok(opt)
     }

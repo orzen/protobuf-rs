@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::fmt::Display;
 
 use crate::error::ParserError;
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,23 +40,23 @@ impl TryFrom<TokenStream> for FieldOption {
 
         let mut opt = FieldOption::new();
 
-        tokens.next_is(Token::LBrack, "field option opening bracket('[')")?;
+        tokens.next_eq(Type::LBrack, "field option opening bracket('[')")?;
 
         while !tokens.is_empty() {
-            let name = tokens.next_is_fullident("field option name")?;
-            tokens.next_is(Token::Assign, "field option assignment('=')")?;
-            let value = tokens.next_is_constant("field option value")?;
+            let name = tokens.fullident_as_string("field option name")?;
+            tokens.next_eq(Type::Assign, "field option assignment('=')")?;
+            let value = tokens.constant_as_string("field option value")?;
 
             opt.push((name, value));
 
-            if tokens.peek_is(Token::RBrack) {
+            if tokens.peek_eq(Type::RBrack) {
                 break;
             }
 
-            tokens.next_is(Token::Comma, "field option delimiter(',')")?;
+            tokens.next_eq(Type::Comma, "field option delimiter(',')")?;
         }
 
-        tokens.next_is(Token::RBrace, "field option closing bracket(']')")?;
+        tokens.next_eq(Type::RBrace, "field option closing bracket(']')")?;
 
         Ok(opt)
     }

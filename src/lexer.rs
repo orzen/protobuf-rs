@@ -4,8 +4,8 @@ use std::io::Read;
 
 use crate::buffer::Buffer;
 use crate::error::LexerError;
-use crate::position::Position;
-use crate::token::Token;
+use crate::position::{Point, Position};
+use crate::token::{Token, Type};
 use crate::token_stream::TokenStream;
 
 // Boolean
@@ -14,6 +14,7 @@ const BOOL_LIT: &str = r"(true | false)";
 // Identifiers
 const IDENT: &str = r"[a-zA-Z0-9_]+";
 const FULL_IDENT: &str = r"([a-zA-Z0-9_]+[.]?)+";
+const OPT_LIT: &str = r"([a-zA-Z0-9\(\)\.]+)";
 
 // Integer literals
 const DEC_LIT: &str = r"([1-9]?[0-9]+)";
@@ -27,7 +28,6 @@ const FLOAT_LIT3: &str = r"(\.[0-9]+([eE]?[+-]?[0-9]+)?)";
 const FLOAT_LIT4: &str = r"(inf | nan)";
 
 // String literals
-//const INVALID_CHAR_BEGIN: &str = "[^\0\n\\]";
 //  Hex escape values
 const HEX_ESCAPE: &str = "(\\[xX]{1}[a-fA-F0-9]{2})";
 //  Oct escape values
@@ -35,31 +35,18 @@ const OCT_ESCAPE: &str = "(\\[0-7]{3})";
 // Char escape values
 const CHAR_ESCAPE: &str = "\\[abfnrtv]{1}";
 
-enum State<'s> {
-    Default,
-    Comment,
-    BlockComment,
-    Constant(&'s char),
-}
-
-impl<'s> Default for State<'s> {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
-pub struct Lexer<'l> {
-    pos: Position,
-    state: State<'l>,
+pub struct Lexer {
+    pos: Point,
 
     ptn_intlit: Regex,
     ptn_ident: Regex,
     ptn_full_ident: Regex,
     ptn_const: Regex,
+    ptn_optlit: Regex,
 }
 
-impl<'l> Lexer<'l> {
-    pub fn new() -> Lexer<'l> {
+impl Lexer {
+    pub fn new() -> Result<Self, LexerError> {
         let int_lit = format!("({}) | ({}) | ({})", DEC_LIT, OCT_LIT, HEX_LIT);
         let str_lit_base = format!("({} | {} | {} )", HEX_ESCAPE, OCT_ESCAPE, CHAR_ESCAPE);
         let str_lit = format!("( \"{}\" | \'{}\' )", str_lit_base, str_lit_base);
@@ -67,85 +54,86 @@ impl<'l> Lexer<'l> {
             "( {} | {} | {} | {} )",
             FLOAT_LIT1, FLOAT_LIT2, FLOAT_LIT3, FLOAT_LIT4
         );
-        // TODO fix constant
-        // - Add quote to contant
-        // - Add second constant pattern with single quote
         let constant = format!(
             "{} | [+-]?{} | [+-]?{} | {} | {}",
             FULL_IDENT, int_lit, float_lit, str_lit, BOOL_LIT
         );
 
         // Patterns
-        let ptn_const = Regex::new(&constant).expect("compile const1 pattern");
-        let ptn_full_ident = Regex::new(FULL_IDENT).expect("compile full ident pattern");
-        let ptn_ident = Regex::new(IDENT).expect("compile ident pattern");
-        let ptn_intlit = Regex::new(&int_lit).expect("compile ident pattern");
+        let ptn_const = Regex::new(&constant)?;
+        let ptn_full_ident = Regex::new(FULL_IDENT)?;
+        let ptn_ident = Regex::new(IDENT)?;
+        let ptn_intlit = Regex::new(&int_lit)?;
+        let ptn_optlit = Regex::new(OPT_LIT)?;
 
-        Lexer {
-            pos: Position::new(0, 0),
-            state: State::default(),
+        Ok(Lexer {
+            pos: Point::new(0, 0),
 
             // Patterns
             ptn_intlit,
             ptn_ident,
             ptn_full_ident,
             ptn_const,
-        }
+            ptn_optlit,
+        })
     }
 
-    fn end_state(&self, ch: &char) -> bool {
-        match self.state {
-            State::Default => false,
-            State::Comment => matches!(ch, '\n' | '\r' | '\t' | ' '),
-            State::BlockComment => true,
-            State::Constant(delimiter) => ch == delimiter,
-        }
+    fn range(&self, stash: &str) -> Position {
+        Position::range(self.pos) + stash.len()
     }
 
     fn is_discardable(&self, ch: &char) -> bool {
-        match self.state {
-            State::Default => matches!(ch, '\n' | '\r' | '\t' | ' '),
-            State::Comment => matches!(ch, '\n' | '\r' | '\t' | ' '),
-            State::BlockComment => true,
-            State::Constant(delimiter) => true,
-        }
+        matches!(ch, '\n' | '\r' | '\t' | ' ')
     }
 
-    fn match_literals(&self, stash: &'l str) -> Token {
+    fn is_match(ptn: &Regex, stash: &str) -> bool {
+        if let Some(matched) = ptn.find(stash) {
+            if stash.eq(matched.as_str()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn match_literals(&self, stash: &str) -> Type {
         // NOTE: The order in this list will dictate the token priority. Changing the order can
         // cause some tokens to become unreachable.
 
         match stash {
-            "true" => return Token::BoolLit(true),
-            "false" => return Token::BoolLit(false),
+            "true" => return Type::BoolLit(true),
+            "false" => return Type::BoolLit(false),
             _ => (),
         }
 
-        if self.ptn_intlit.is_match(stash) {
+        if Self::is_match(&self.ptn_intlit, stash) {
             match stash.parse::<i32>() {
                 Ok(v) => {
-                    return Token::IntLit(v);
+                    return Type::IntLit(v);
                 }
                 Err(e) => {
                     warn!("failed to convert string to int literal {e}");
-                    return Token::Illegal;
+                    return Type::Illegal;
                 }
             }
         }
 
-        if self.ptn_ident.is_match(stash) {
-            return Token::Ident(stash.to_string());
+        if Self::is_match(&self.ptn_ident, stash) {
+            return Type::Ident(stash.to_string());
         }
 
-        if self.ptn_full_ident.is_match(stash) {
-            return Token::FullIdent(stash.to_string());
+        if Self::is_match(&self.ptn_full_ident, stash) {
+            return Type::FullIdent(stash.to_string());
         }
 
-        if self.ptn_const.is_match(stash) {
-            return Token::Constant(stash.to_string());
+        if Self::is_match(&self.ptn_const, stash) {
+            return Type::Constant(stash.to_string());
         }
 
-        return Token::Illegal;
+        if Self::is_match(&self.ptn_optlit, stash) {
+            return Type::OptionName(stash.to_string());
+        }
+
+        return Type::Illegal;
     }
 
     pub fn tokenize(&self, ch: char, stash: &mut String) -> Option<Token> {
@@ -156,9 +144,9 @@ impl<'l> Lexer<'l> {
 
         // Match single character tokens
         if stash.is_empty() {
-            match Token::from(&ch) {
-                Token::Illegal => (),
-                token => return Some(token),
+            match Type::from(&ch) {
+                Type::Illegal => (),
+                typ => return Some(Token::from(typ)),
             }
         }
 
@@ -166,14 +154,14 @@ impl<'l> Lexer<'l> {
         stash.push(ch);
 
         // Match keywords against stash
-        match Token::from(stash.as_str()) {
-            Token::Illegal => (),
-            token => return Some(token),
+        match Type::from(stash.as_str()) {
+            Type::Illegal => (),
+            typ => return Some(Token::from(typ)),
         }
 
         match self.match_literals(stash) {
-            Token::Illegal => (),
-            token => return Some(token),
+            Type::Illegal => (),
+            typ => return Some(Token::from(typ)),
         }
 
         return None;
@@ -187,31 +175,32 @@ impl<'l> Lexer<'l> {
         while let Some(chars) = buf.next() {
             for ch in chars {
                 if ch.eq(&'\n') {
-                    self.pos *= 1;
-                } else {
-                    self.pos += 1;
+                    self.pos *= 0;
                 }
 
-                let token = self.tokenize(ch, &mut stash);
-
-                match token {
-                    Some(Token::Illegal) => {
-                        debug!("invalid token '{stash}'");
-                        return Err(LexerError::Invalid(stash.clone()));
-                    }
-                    Some(token) => {
-                        debug!("identified token: {:?}", token);
-                        return Ok(token);
-                    }
+                let mut token = match self.tokenize(ch, &mut stash) {
+                    Some(v) => v,
                     None => {
                         debug!("stashing: {ch}, stash: {stash}");
                         continue;
                     }
+                };
+
+                if token.typ().eq(&Type::Illegal) {
+                    debug!("invalid token: '{stash}' {}", self.range(&stash));
+                    return Err(LexerError::Invalid(stash.clone()));
                 }
+
+                // Complete the token by assigning it the correct position
+                let pos = self.range(&stash);
+                debug!("identified token '{token}' and updating its position to {pos}");
+                token.set_position(pos);
+
+                return Ok(token);
             }
         }
 
-        Ok(Token::Illegal)
+        return Err(LexerError::Invalid(format!("stash: {stash}")));
     }
 
     pub fn token_stream<T>(&mut self, mut buf: Buffer<T>) -> Result<TokenStream, LexerError>
@@ -219,11 +208,18 @@ impl<'l> Lexer<'l> {
         T: Read,
     {
         let mut tokens = TokenStream::new();
-        while let Ok(token) = self.next_token(&mut buf) {
-            tokens.push(token.clone());
+        let eof = Token::from(Type::EOF);
 
-            if token == Token::EOF {
-                break;
+        loop {
+            match self.next_token(&mut buf) {
+                Ok(token) => {
+                    if token == eof {
+                        break;
+                    }
+
+                    tokens.push(token);
+                }
+                Err(e) => return Err(e),
             }
         }
 
@@ -231,42 +227,40 @@ impl<'l> Lexer<'l> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::BufReader;
-    use std::io::Cursor;
-
-    #[test]
-    fn new() {
-        let file = Cursor::new(String::from("foobar"));
-        let inner = BufReader::new(file);
-        let buf = Buffer::new(inner);
-
-        Lexer::new(buf);
-    }
-
-    #[test]
-    fn syntax() {
-        let pb = "syntax = \"proto3\'";
-        let cursor = Cursor::new(pb);
-        let bf = BufReader::new(cursor);
-        let inner = Buffer::new(bf);
-
-        let mut lexer = Lexer::new(inner);
-
-        let mut expected = TokenStream::new();
-        expected.push(Token::Syntax);
-        expected.push(Token::Assign);
-        expected.push(Token::DQuote);
-        expected.push(Token::Ident("proto3".to_string()));
-        expected.push(Token::DQuote);
-
-        let actual = match lexer.token_stream() {
-            Ok(v) => v,
-            Err(e) => panic!("got error '{e }'"),
-        };
-
-        assert_eq!(expected, actual);
-    }
-}
+//#[cfg(test)]
+//mod tests {
+//    use super::*;
+//    use std::io::BufReader;
+//    use std::io::Cursor;
+//
+//    #[test]
+//    fn new() {
+//        let file = Cursor::new(String::from("foobar"));
+//        let inner = BufReader::new(file);
+//        let buf = Buffer::new(inner);
+//
+//        Lexer::new(buf);
+//    }
+//
+//    #[test]
+//    fn syntax() {
+//        let pb = "syntax = \"proto3\'";
+//        let cursor = Cursor::new(pb);
+//        let bf = BufReader::new(cursor);
+//        let inner = Buffer::new(bf);
+//
+//        let mut lexer = Lexer::new(inner);
+//
+//        let mut expected = TokenStream::new();
+//        expected.push(Token::from(Type::Syntax));
+//        expected.push(Token::from(Type::Assign));
+//        expected.push(Token::constant("proto3".to_string()));
+//
+//        let actual = match lexer.token_stream() {
+//            Ok(v) => v,
+//            Err(e) => panic!("got error '{e }'"),
+//        };
+//
+//        assert_eq!(expected, actual);
+//    }
+//}

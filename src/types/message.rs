@@ -1,15 +1,17 @@
-use std::fmt::Display;
 use log::debug;
+use std::fmt::Display;
 
 use crate::error::ParserError;
 use crate::indent::{indent, level};
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
-use crate::types::option_field::OptionField;
-use crate::types::oneof::Oneof;
-use crate::types::map::Map;
-use crate::types::field::Field;
 use crate::types::enumerate::Enum;
+use crate::types::field::Field;
+use crate::types::map::Map;
+use crate::types::oneof::Oneof;
+use crate::types::option_field::OptionField;
+
+use super::comment::{BlockComment, LineComment};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MessageMember {
@@ -19,6 +21,8 @@ pub enum MessageMember {
     Message(Message),
     Oneof(Oneof),
     Option(OptionField),
+    LineComment(LineComment),
+    BlockComment(BlockComment),
 }
 
 impl From<Enum> for MessageMember {
@@ -57,12 +61,23 @@ impl From<OptionField> for MessageMember {
     }
 }
 
+impl From<BlockComment> for MessageMember {
+    fn from(value: BlockComment) -> Self {
+        MessageMember::BlockComment(value)
+    }
+}
+
+impl From<LineComment> for MessageMember {
+    fn from(value: LineComment) -> Self {
+        MessageMember::LineComment(value)
+    }
+}
+
 impl Display for MessageMember {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
     }
 }
-
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Message {
@@ -72,7 +87,10 @@ pub struct Message {
 
 impl Message {
     pub fn new(name: String) -> Self {
-        Self { name, ..Default::default() }
+        Self {
+            name,
+            ..Default::default()
+        }
     }
 
     pub fn push(&mut self, value: MessageMember) {
@@ -87,39 +105,67 @@ impl TryFrom<TokenStream> for Message {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("message({:?})", tokens);
 
-        tokens.next_is(Token::Message, "message identifier")?;
-        let name = tokens.next_is_ident("message name")?;
+        tokens.next_eq(Type::Message, "message identifier")?;
+        let name = tokens.ident_as_string("message name")?;
 
         let mut res = Message::new(name);
 
         while !tokens.is_empty() {
-            let member = match tokens.last() {
-                Some(Token::Enum) => {
-                    let block = tokens.block(Token::LBrace, Token::RBrace);
+            let peek_token = match tokens.peek() {
+                Some(v) => v,
+                None => {
+                    return Err(ParserError::Syntax(
+                        "message member".to_string(),
+                        "nothing".to_string(),
+                    ))
+                }
+            };
+
+            let member = match peek_token.typ() {
+                Type::Enum => {
+                    let block = tokens.select_block(Type::LBrace, Type::RBrace);
                     MessageMember::from(Enum::try_from(block)?)
                 }
-                Some(Token::Map) => {
-                    let line = tokens.line(Token::Semicolon);
+                Type::Map => {
+                    let line = tokens.select_until(Type::Semicolon);
                     MessageMember::from(Enum::try_from(line)?)
                 }
-                Some(Token::Message) => {
-                    let block = tokens.block(Token::LBrace, Token::RBrace);
+                Type::Message => {
+                    let block = tokens.select_block(Type::LBrace, Type::RBrace);
                     MessageMember::from(Message::try_from(block)?)
                 }
-                Some(Token::Oneof) => {
-                    let block = tokens.block(Token::LBrace, Token::RBrace);
+                Type::Oneof => {
+                    let block = tokens.select_block(Type::LBrace, Type::RBrace);
                     MessageMember::from(Oneof::try_from(block)?)
                 }
-                Some(Token::Option) => {
-                    let line = tokens.line(Token::Semicolon);
+                Type::Option => {
+                    let line = tokens.select_until(Type::Semicolon);
                     MessageMember::from(OptionField::try_from(line)?)
                 }
-                Some(_field) => {
-                    let line = tokens.line(Token::Semicolon);
+                Type::RBrace => {
+                    break;
+                }
+                Type::Slash => {
+                    if tokens.is_line_comment() {
+                        let line = tokens.select_line_comment()?;
+                        MessageMember::from(LineComment::from(line))
+                    } else if tokens.is_block_comment() {
+                        let block = tokens.select_block_comment()?;
+                        MessageMember::from(BlockComment::from(block))
+                    } else {
+                        return Err(ParserError::Syntax(
+                            "message comment".to_string(),
+                            format!("message tokens: {tokens}"),
+                        ));
+                    }
+                }
+                _field => {
+                    let line = tokens.select_until(Type::Semicolon);
                     MessageMember::from(Field::try_from(line)?)
                 }
-                None => unreachable!(),
             };
+
+            tokens.next_eq(Type::RBrace, "message closing brace('}')")?;
 
             res.push(member);
         }
@@ -131,12 +177,15 @@ impl TryFrom<TokenStream> for Message {
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let i = level(f);
-        indent(f)?;
 
+        indent(f)?;
         writeln!(f, "message {} {{", self.name)?;
+
         for member in &self.members {
             writeln!(f, "{:indent$}", member, indent = i + 1)?;
         }
+
+        indent(f)?;
         writeln!(f, "}}")
     }
 }

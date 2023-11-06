@@ -3,15 +3,30 @@ use std::fmt::Display;
 
 use crate::error::ParserError;
 use crate::indent::{indent, level};
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 use crate::types::option_field::OptionField;
 use crate::types::rpc::Rpc;
+use crate::types::comment::{BlockComment, LineComment};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServiceMember {
+    BlockComment(BlockComment),
+    LineComment(LineComment),
     Option(OptionField),
     RPC(Rpc),
+}
+
+impl From<BlockComment> for ServiceMember {
+    fn from(value: BlockComment) -> Self {
+        ServiceMember::BlockComment(value)
+    }
+}
+
+impl From<LineComment> for ServiceMember {
+    fn from(value: LineComment) -> Self {
+        ServiceMember::LineComment(value)
+    }
 }
 
 impl From<OptionField> for ServiceMember {
@@ -58,28 +73,15 @@ impl TryFrom<TokenStream> for Service {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("service({:?})", &tokens);
 
-        tokens.next_is(Token::Service, "service identifier")?;
-        let name = tokens.next_is_fullident("service name")?;
-        tokens.next_is(Token::LBrace, "serice opening brace('{')")?;
+        tokens.next_eq(Type::Service, "service identifier")?;
+        let name = tokens.fullident_as_string("service name")?;
+        tokens.next_eq(Type::LBrace, "serice opening brace('{')")?;
 
         let mut service = Service::new(name.to_string());
 
         while !tokens.is_empty() {
-            let member = match tokens.last() {
-                Some(Token::Option) => {
-                    let option_tokens = tokens.line(Token::Semicolon);
-                    ServiceMember::from(OptionField::try_from(option_tokens)?)
-                }
-                Some(Token::RPC) => {
-                    let rpc_tokens = tokens.line(Token::Semicolon);
-                    ServiceMember::from(Rpc::try_from(rpc_tokens)?)
-                }
-                Some(invalid) => {
-                    return Err(ParserError::Syntax(
-                        "service member".to_string(),
-                        format!("{:?}", invalid),
-                    ))
-                }
+            let peek_token = match tokens.peek() {
+                Some(v) => v,
                 None => {
                     return Err(ParserError::Syntax(
                         "service option or rpc".to_string(),
@@ -88,10 +90,41 @@ impl TryFrom<TokenStream> for Service {
                 }
             };
 
+            let member = match peek_token.typ() {
+                Type::Option => {
+                    let option_tokens = tokens.select_until(Type::Semicolon);
+                    ServiceMember::from(OptionField::try_from(option_tokens)?)
+                }
+                Type::RPC => {
+                    let rpc_tokens = tokens.select_until(Type::Semicolon);
+                    ServiceMember::from(Rpc::try_from(rpc_tokens)?)
+                }
+                Type::Slash => {
+                    if tokens.is_line_comment() {
+                        let line = tokens.select_line_comment()?;
+                        ServiceMember::from(LineComment::from(line))
+                    } else if tokens.is_block_comment() {
+                        let block = tokens.select_block_comment()?;
+                        ServiceMember::from(BlockComment::from(block))
+                    } else {
+                        return Err(ParserError::Syntax(
+                            "service comment".to_string(),
+                            format!("service tokens: {tokens}"),
+                        ));
+                    }
+                }
+                invalid => {
+                    return Err(ParserError::Syntax(
+                        "service member".to_string(),
+                        format!("{invalid}"),
+                    ))
+                }
+            };
+
             service.push(member);
         }
 
-        tokens.next_is(Token::RBrace, "service closing brace('}')")?;
+        tokens.next_eq(Type::RBrace, "service closing brace('}')")?;
 
         Ok(service)
     }

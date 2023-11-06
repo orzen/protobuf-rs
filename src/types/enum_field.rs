@@ -3,7 +3,7 @@ use log::debug;
 
 use crate::error::ParserError;
 use crate::indent::indent;
-use crate::token::Token;
+use crate::token::Type;
 use crate::token_stream::TokenStream;
 use crate::types::field_option::FieldOption;
 
@@ -35,12 +35,12 @@ impl TryFrom<TokenStream> for EnumField {
     fn try_from(mut tokens: TokenStream) -> Result<Self, Self::Error> {
         debug!("enum field({:?})", tokens);
 
-        tokens.next_is(Token::Semicolon, "enum field line ending(';')")?;
+        tokens.next_eq(Type::Semicolon, "enum field line ending(';')")?;
 
         // Handle field options
-        let options = match tokens.peek_is(Token::RBrack) {
+        let options = match tokens.peek_eq(Type::RBrack) {
             true => {
-                let option_tokens = tokens.block(Token::RBrack, Token::LBrace);
+                let option_tokens = tokens.select_block(Type::RBrack, Type::LBrace);
                 Some(FieldOption::try_from(option_tokens)?)
             }
             false => None,
@@ -48,9 +48,9 @@ impl TryFrom<TokenStream> for EnumField {
 
         // Note index could be a negative integer according to spec.
         // https://protobuf.dev/reference/protobuf/proto3-spec/#enum_definition
-        let index = tokens.next_is_intlit("enum field index")?;
-        tokens.next_is(Token::Assign, "enum field assignment('=')")?;
-        let name = tokens.next_is_ident("enum field name")?;
+        let index = tokens.intlit_as_i32("enum field index")?;
+        tokens.next_eq(Type::Assign, "enum field assignment('=')")?;
+        let name = tokens.ident_as_string("enum field name")?;
 
         let mut res = Self::new(name, index);
         res.set_options(options);

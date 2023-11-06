@@ -1,4 +1,3 @@
-use std::num::ParseIntError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,8 +16,8 @@ pub enum LexerError {
     Buffer(#[from] BufferError),
     #[error("invalid token: '{0}'")]
     Invalid(String),
-    //#[error(transparent)]
-    //Parse(#[from] ParseIntError),
+    #[error(transparent)]
+    Regex(#[from] regex::Error),
     #[error("{0}")]
     Generic(String), // Rename to Tokenize
 }

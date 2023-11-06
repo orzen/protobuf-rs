@@ -1,3 +1,4 @@
+pub mod comment;
 pub mod enumerate;
 pub mod enum_field;
 pub mod field;
